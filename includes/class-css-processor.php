@@ -110,74 +110,7 @@ class CSSProcessor {
         }, 2);
     }
 
-    private function optimize_css($css) {
-        // Remove comments and whitespace
-        $css = preg_replace('!/\*[^*]*\*+([^/][^*]*\*+)*/!', '', $css);
-        $css = str_replace(["\r\n", "\r", "\n", "\t"], '', $css);
-
-        // Combine multiple selectors
-        $css = preg_replace('/\s*([,:])\s*/', '$1', $css);
-        
-        // Remove unnecessary semicolons and spaces
-        $css = str_replace([';}', ' {', '{ ', ' }', '} '], ['}', '{', '{', '}', '}'], $css);
-        
-        // Optimize hex colors
-        $css = preg_replace('/\#([a-f0-9])\1([a-f0-9])\2([a-f0-9])\3/i', '#$1$2$3', $css);
-        
-        // Convert rgb to hex where possible
-        $css = preg_replace_callback('/rgb\((\d+),(\d+),(\d+)\)/i', function($matches) {
-            return sprintf("#%02x%02x%02x", $matches[1], $matches[2], $matches[3]);
-        }, $css);
-
-        // Optimize values
-        $css = preg_replace('/\s*(0)(?:px|em|%|in|cm|mm|pc|pt|ex|deg|g?rad|m?s|k?hz)\s*/i', '$1', $css);
-        $css = preg_replace('/\s*0 0 0 0\s*/', '0', $css);
-        
-        // Combine similar properties
-        $css = preg_replace('/margin-(top|right|bottom|left):\s*0\s*;/i', '', $css);
-        $css = preg_replace('/padding-(top|right|bottom|left):\s*0\s*;/i', '', $css);
-
-        return trim($css);
-    }
-
-    private function should_process_style($handle, $wp_styles) {
-        if (!isset($wp_styles->registered[$handle]) || empty($wp_styles->registered[$handle]->src)) {
-            return false;
-        }
-
-        if (strpos($handle, 'code-block-pro') !== false || 
-            strpos($handle, 'kevinbatdorf') !== false || 
-            strpos($handle, 'shiki') !== false) {
-            return false;
-        }
-
-        return !$this->should_skip($handle);
-    }
-
-    private function should_skip($handle) {
-        $skip_handles = [
-            'admin-bar', 
-            'dashicons',
-            'code-block-pro',
-            'wp-block-kevinbatdorf-code-block-pro',
-            'shiki'
-        ];
-        
-        if ($this->options['exclude_font_awesome']) {
-            $font_awesome_handles = ['font-awesome', 'fontawesome', 'fa', 'font-awesome-official'];
-            $skip_handles = array_merge($skip_handles, $font_awesome_handles);
-        }
-        
-        foreach ($skip_handles as $skip_handle) {
-            if (strpos($handle, $skip_handle) !== false) {
-                return true;
-            }
-        }
-        
-        return false;
-    }
-}
-     private function get_css_content($handle, $wp_styles) {
+    private function get_css_content($handle, $wp_styles) {
         $style = $wp_styles->registered[$handle];
         $src = $this->normalize_url($style->src);
         
@@ -189,8 +122,6 @@ class CSSProcessor {
         return $this->fetch_remote_css($src);
     }
 
-
-    
     private function normalize_url($src) {
         if (strpos($src, '//') === 0) {
             return 'https:' . $src;
@@ -200,7 +131,7 @@ class CSSProcessor {
         return $src;
     }
 
-     private function get_local_css_path($src) {
+    private function get_local_css_path($src) {
         $parsed_url = parse_url($src);
         $path = isset($parsed_url['path']) ? ltrim($parsed_url['path'], '/') : '';
         
@@ -229,17 +160,7 @@ class CSSProcessor {
         return !is_wp_error($response) ? wp_remote_retrieve_body($response) : false;
     }
 
-    private function process_and_enqueue_style($handle, $css_content, $wp_styles) {
-        $optimized_css = $this->optimize_css($css_content);
-        $optimized_css = $this->fix_font_paths($optimized_css, dirname($wp_styles->registered[$handle]->src));
-
-        wp_deregister_style($handle);
-        wp_register_style($handle . '-optimized', false);
-        wp_enqueue_style($handle . '-optimized');
-        wp_add_inline_style($handle . '-optimized', $optimized_css);
-    }
-
-      private function optimize_css($css) {
+    private function optimize_css($css) {
         if ($this->options['preserve_media_queries']) {
             preg_match_all('/@media[^{]+\{([^}]+)\}/s', $css, $media_queries);
             $media_blocks = isset($media_queries[0]) ? $media_queries[0] : [];
@@ -252,11 +173,8 @@ class CSSProcessor {
             foreach ($matches[0] as $i => $rule) {
                 $selectors = $matches[1][$i];
                 
-                // Skip optimization for Code Block Pro related selectors
-                if (strpos($selectors, 'code-block-pro') !== false ||
-                    strpos($selectors, 'wp-block-kevinbatdorf') !== false ||
-                    strpos($selectors, 'shiki') !== false ||
-                    strpos($selectors, 'cbp-') !== false) {
+                // Skip optimization for excluded selectors
+                if ($this->should_skip_selector($selectors)) {
                     $optimized .= $rule;
                     continue;
                 }
@@ -275,6 +193,21 @@ class CSSProcessor {
         }
 
         return $this->minify_css($optimized);
+    }
+
+    private function should_skip_selector($selectors) {
+        $skip_patterns = array_merge(
+            ['code-block-pro', 'wp-block-kevinbatdorf', 'shiki', 'cbp-'],
+            $this->options['excluded_classes'] ?? []
+        );
+
+        foreach ($skip_patterns as $pattern) {
+            if (strpos($selectors, $pattern) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function optimize_properties($properties) {
@@ -299,17 +232,42 @@ class CSSProcessor {
         return trim(preg_replace('/\s+/', ' ', $css));
     }
 
-    private function fix_font_paths($css, $base_url) {
-        return preg_replace_callback(
-            '/url\([\'"]?(?!data:)([^\'")]+)[\'"]?\)/i',
-            function($matches) use ($base_url) {
-                $url = $matches[1];
-                if (strpos($url, 'http') !== 0 && strpos($url, '//') !== 0) {
-                    $url = trailingslashit($base_url) . ltrim($url, '/');
-                }
-                return 'url("' . $url . '")';
-            },
-            $css
-        );
+    private function should_process_style($handle, $wp_styles) {
+        if (!isset($wp_styles->registered[$handle]) || empty($wp_styles->registered[$handle]->src)) {
+            return false;
+        }
+
+        // Check excluded URLs
+        $src = $wp_styles->registered[$handle]->src;
+        foreach ($this->options['excluded_urls'] as $pattern) {
+            if (fnmatch($pattern, $src)) {
+                return false;
+            }
+        }
+
+        return !$this->should_skip($handle);
+    }
+
+    private function should_skip($handle) {
+        $skip_handles = [
+            'admin-bar', 
+            'dashicons',
+            'code-block-pro',
+            'wp-block-kevinbatdorf-code-block-pro',
+            'shiki'
+        ];
+        
+        if ($this->options['exclude_font_awesome']) {
+            $font_awesome_handles = ['font-awesome', 'fontawesome', 'fa', 'font-awesome-official'];
+            $skip_handles = array_merge($skip_handles, $font_awesome_handles);
+        }
+        
+        foreach ($skip_handles as $skip_handle) {
+            if (strpos($handle, $skip_handle) !== false) {
+                return true;
+            }
+        }
+        
+        return false;
     }
 }
